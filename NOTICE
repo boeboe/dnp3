@@ -1,0 +1,53 @@
+dnp3 (DNP3 / IEEE 1815 master, outstation and Secure Authentication v5, in Go)
+Copyright 2026 Abhinav Gautam
+
+This module is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The code was written for SigmaM2M, a oneM2M platform, from IEEE Std
+1815-2012 and the other documents listed in PROVENANCE.md. It contains no
+code from other projects. The source files that come from SigmaM2M carry
+no per-file copyright header (the convention of the code they come from);
+the copyright line above covers them. Files added for this module carry
+"Copyright 2026 Abhinav Gautam" and "SPDX-License-Identifier: Apache-2.0".
+
+Specifications
+--------------
+
+IEEE Std 1815-2012 is a licensed IEEE standard; it is not redistributed.
+Function and object codes, sizes, bit positions, table orders and the
+standard's short octet examples (used as test vectors) are facts, written
+in our own words with clause references. No text of the standard is
+reproduced. DNP3 is a protocol of the DNP Users Group; this project is
+not affiliated with or endorsed by it or by the IEEE.
+
+Dependencies
+------------
+
+- github.com/goburrow/serial v0.1.0 (MIT, Copyright (c) 2015 Quoc-Viet
+  Nguyen): serial lines (OpenChannel with a serial URL).
+- github.com/cB-Sigma/iotsec (Apache-2.0, Copyright 2026 Abhinav
+  Gautam): the security seams.
+- The Go standard library (BSD-3-Clause, Copyright The Go Authors).
+
+Interop test peer (interop/, not part of the module's packages)
+---------------------------------------------------------------
+
+The nested test-only module interop/ builds opendnp3 3.1.2
+(https://github.com/dnp3/opendnp3, Apache-2.0, Copyright 2010-2020 Green
+Energy Corp and Automatak LLC, with its NOTICE) in a Docker container
+from its sources and links two small programs of ours
+(interop/peer/master.cpp and outstation.cpp, Apache-2.0) against it. No
+opendnp3 source is included in this repository; the container image is
+built on the tester's machine and not distributed.
+
+Test data
+---------
+
+The tests use the octet examples of IEEE Std 1815-2012 named in each test
+(clause 4 function code examples, the 9.2.4.3 frame, the Annex E CRC
+table, the clause 8 segmenting example, the file transfer and data set
+examples); RFC 3394 section 4, RFC 4231 test case 2 and RFC 2202 test
+case 2 vectors; and the AES-GCM result for an all-zero key and IV (NIST
+SP 800-38D test case 1). Every key, password, certificate, address and
+point value in the tests and the examples is a made-up demo value; none
+belongs to a real installation.
