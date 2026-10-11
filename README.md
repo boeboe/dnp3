@@ -20,7 +20,9 @@ outstation integrations.
 | Data link layer: block CRCs, resynchronisation, FCB/FCV, link reset, test, confirmed and unconfirmed user data, link status, self-address | yes |
 | Transport function: segments of 1 to 249 octets, repeats dropped | yes |
 | Application layer: every function code and qualifier of Table 4-6, sequence numbers, confirmations, multi-fragment and unsolicited responses | yes |
-| Objects: binary, double-bit, binary output, counters, frozen counters, analogs, frozen analogs, analog outputs, their events (absolute or relative time), command events, deadbands, BCD, octet strings, virtual terminal, device storage, security statistics | yes; device profile objects are carried as raw data |
+| Objects: binary, double-bit, binary output, counters, frozen counters, analogs, frozen analogs, analog outputs, their events (absolute or relative time), command events, deadbands, BCD, octet strings, virtual terminal, device storage, security statistics | yes; device profile objects (g0 sets other than 0) are carried as raw data |
+| Outstation database: per-point classes, variations and deadbands; event modes (detect, force, suppress, event only); flags-only updates; event buffers bounded per class and per point type, losing the new or the oldest event on overflow | yes (`PointDB.UpdateWith`, `UpdateFlags`, `EventBuffer.SetTypeCapacity`, `SetDropOldest`) |
+| Gateway (data concentrator): downstream outstations' points republished on our outstation under other indexes, events passed with their time, controls passed down with their status, COMM_LOST on loss | yes (`gateway`; tested with opendnp3 on both sides) |
 | Device attributes (group 0, set 0) | yes; other sets no |
 | Time synchronisation (LAN and non-LAN) | yes; the outstation never sets the host clock |
 | Freeze, freeze-and-clear, freeze at time, assign class, restarts, application control, activate configuration | yes |
@@ -29,10 +31,11 @@ outstation integrations.
 | Pattern control blocks | binary outputs (g12v3) only, as the standard defines |
 | Channels: TCP, TLS, UDP (including a fixed reply port), serial lines; several outstations on one link (multi-drop) | yes |
 | Secure Authentication v5: session keys, challenge/reply, aggressive mode, HMAC-SHA-1/SHA-256 and AES-GMAC, the 18 statistics and their limits | yes |
-| Update key change: symmetric methods 3 to 5, asymmetric 67 to 71 with g120v8 user certificates | yes; the authority's own protocol is outside the standard and not built |
+| Update key change: symmetric methods 3 to 5, asymmetric 67 to 71 with g120v8 user certificates | yes |
+| Update key authority | a reference service (`authority`): user register, per-master tokens, the status change sequence number per outstation, certification and key encryption, g120v8 certificates (DSA), audit log; the master–authority protocol is not standardised, so ours (JSON over HTTP) talks only to this package |
 | Secure Authentication v6 | no |
 | Broadcast | outstation: per function code, critical requests only in verified aggressive mode under SA; master: never sends |
-| Device profile document (XML) | no (an application's own) |
+| Device profile document (XML) | data points list and configuration items, written from a `PointDB` and read back into one (`profile`); not validated against the DNP Users Group schema, which is for members |
 | Time-and-interval points (g50v4): class 0, reads, master writes | yes |
 | Deadbands on analogs, analog outputs, counters and frozen counters | yes |
 | A polling session on the master (`RunSession`): start-up sequence, periodic integrity polls and class scans, polls on IIN1.1 to 1.3, LAN or non-LAN time synchronisation when asked, start-up again after a restart | yes; requests of the application's own (controls, files) take turns with it |
@@ -66,7 +69,10 @@ row.
 | Virtual terminal (groups 112, 113) | yes: codec, outstation ports | no (objects named only) | no | |
 | Time-and-interval points (g50v4) | yes (tested against opendnp3) | yes | not checked | |
 | Master scheduling (periodic scans, start-up sequence, automatic time sync) | yes (`RunSession`; tested against opendnp3) | yes | yes | |
-| Event database with per-point configuration | yes (`PointDB`) | yes | yes | |
+| Event database with per-point configuration | yes (`PointDB`: event modes, per-type buffer sizes, drop-oldest) | yes | yes | |
+| Gateway / data concentrator | yes (`gateway`, tested with opendnp3 below and above) | no (an application builds it from master and outstation) | no (same) | |
+| Device profile XML | write and read (`profile`) | no | no | |
+| Update key authority | reference service (`authority`) | no | no | |
 | Simulated outstation for tests | yes ([dnp3-sim](https://github.com/cB-Sigma/dnp3-sim)), with two vendor presets | demo programs | example programs | |
 
 Pick this module for a Go program, for Secure Authentication v5, or for
@@ -110,6 +116,20 @@ go m.RunSession(ctx, dnp3.SessionConfig{Unsolicited: []int{1, 2, 3}, TimeSync: d
 	OnData: func(f dnp3.Fragment) { /* ParseObjects(f.Objects, true) */ }})
 ```
 
+A gateway: an outstation below republished at other indexes on our
+outstation, its breaker control passed down:
+
+```go
+db := dnp3.NewPointDB()
+g := gateway.New(db, nil)
+src := &gateway.Source{Name: "feeder", Points: []gateway.Map{{Type: "analog", From: 0, To: 200, Class: 2}},
+	Controls: []gateway.Control{{Group: 12, From: 0, To: 50}}}
+_ = g.Add(src)
+src.Master, _ = dnp3.Dial(ctx, dnp3.MasterConfig{URL: "tcp://10.0.0.9:20000", MasterAddress: 1, OutstationAddress: 10, OnUnsolicited: src.Data})
+go src.Master.RunSession(ctx, dnp3.SessionConfig{Unsolicited: []int{1, 2, 3}, OnData: src.Data})
+a := dnp3.NewAssociation(dnp3.OutstationConfig{Address: 20, Master: 100, DB: db, Handler: g.Handler(), Unsolicited: true})
+```
+
 With Secure Authentication, and TLS from crypto/tls (or an IEC 62351-3
 profile implementing `iotsec.TLSClient`):
 
@@ -131,6 +151,9 @@ API reference: https://pkg.go.dev/github.com/cB-Sigma/dnp3
 | Package | What it does |
 |---|---|
 | `dnp3` (module root) | Frames, segments and fragments; object encoding (`EncodeBlock`, `ParseObjects`); the master (`Dial`, `OpenChannel`, `Master.Request`, `SelectOperate`, `ChangeSessionKeys`, `ChangeUpdateKey`); the outstation (`PointDB`, `NewAssociation`, `OutstationNet`); Secure Authentication v5 (`NewAuth`, `NewOutstationAuth`); file transfer, data sets, device attributes |
+| `gateway` | `Gateway`, `Source`, `Map`, `Control`: downstream outstations onto one outstation database |
+| `profile` | device profile documents (XML): `New`, `Write`, `Read`, `Document.Define` |
+| `authority` | the update key authority as a service (`Server`) and the master's client (`Client`, a `dnp3.Authority`) |
 | `interop` (nested module, tests only) | this module's master and outstation against opendnp3 3.1.2 and, for Secure Authentication v5, opendnp3 2.1.0-RC5, in Docker |
 
 ## Testing
@@ -164,6 +187,15 @@ cd interop && SIGMA_DNP3_INTEROP=1 go test -race -v ./...
 ### Interop tested against
 
 Run on 2026-10-11 on macOS with Docker Desktop; every item below passed.
+The v0.3.0 rows were added and run on 2026-10-12 against the same
+builds.
+
+opendnp3 3.1.2 around this module's gateway (v0.3.0):
+
+| Area | What was checked |
+|---|---|
+| Gateway | opendnp3's outstation below, polled by our master (`RunSession`, unsolicited on); opendnp3's master above, against our outstation over the gateway's database: its start-up and integrity poll read the mapped points at the gateway's indexes; a binary change below arrives above as an unsolicited g2v2 event; CROB and g41v3 select-before-operate from opendnp3's master reach opendnp3's outstation at the source's indexes (SELECT, then SELECT and OPERATE) and are reported SUCCESS above; a lost source is read above as events with COMM_LOST and without ONLINE |
+| Database | opendnp3's master reads a forced event of an unchanged value and a flags-only change (flags 4) of our outstation as unsolicited events |
 
 opendnp3 3.1.2 (Apache-2.0), this module's master against opendnp3's
 outstation:
@@ -216,6 +248,8 @@ Not tested against an independent implementation:
   g120v8 user certificates and aggressive mode: opendnp3 2.1.0-RC5 has
   a symmetric update key change on its master, not run here; only this
   module's own master and outstation exercise them.
+- The device profile documents (no open reader of the schema was
+  found) and the authority service (its protocol is ours alone).
 - Real serial hardware (ptys and socat stand in), multi-drop serial
   lines with several outstations, IPv6.
 - stepfunc dnp3 was not run: its licence allows only non-commercial,

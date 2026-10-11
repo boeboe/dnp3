@@ -21,7 +21,14 @@ opendnp3 interop tests (interop/) were added. Version 0.2.0 (2026-10-11)
 added the polling session (session.go), time-and-interval points
 (timeinterval.go), virtual terminal ports (vterm.go) and counter
 deadbands, and fixed the defects the extended interop tests found
-(CHANGELOG.md).
+(CHANGELOG.md). Version 0.3.0 (2026-10-12) added the gateway (gateway/),
+the device profile writer and reader (profile/), the update key
+authority service (authority/) and the event modes, flags-only updates
+and buffer policies of the point database, all written from the clauses
+below; which database features to add was decided by comparing with the
+features opendnp3 3.1.2's outstation database offers through its public
+API (event modes, buffer sizes per type, overflow behaviour), not by
+reading its implementation.
 
 ## Notes on open readings (F- numbers)
 
@@ -55,6 +62,9 @@ are in dnp3-sim, which holds the presets.
 | User certificates (usercert.go) | IEEE 1815-2012 A.45.8 (g120v8); IEC 62351-8 for the IECUserRoles extension OIDs (the token itself is read by the caller's iotsec.RoleAuthority) | none |
 | Serial lines (channel.go) | none (URL parameters are our own) | github.com/goburrow/serial is a dependency, not a source |
 | Polling session (session.go), time-and-interval points (timeinterval.go), virtual terminal ports (vterm.go) | IEEE 1815-2012 clauses 4 and 5 (start-up, class polls, time synchronisation procedures), Annex A (g50v4, g112, g113) | none; the session's task order matches what opendnp3's master does at start-up, observed as a peer, not read from its code |
+| Gateway (gateway/) | clauses 4 and 11 (control procedures, the 4.4.4.3 rule that an operate follows its select directly, status codes; the ONLINE, RESTART and COMM_LOST flags). A data concentrator's behaviour is no standard's; the mapping, the passing of events and controls and the offline marking are our design | none |
+| Device profile (profile/) | IEEE 1815-2012 clause 14 (device profile) and the DNP Users Group's XML device profile, as far as its data points list and configuration items go; element names as we read the published schema 2.x; documents are not validated against it | SigmaM2M's own profile writer is a separate, template-shaped document of the IPE, not this one |
+| Update key authority (authority/) | clause 7.5.4 and Annex A.45 (what the authority certifies and encrypts, the status change sequence number); the master–authority protocol is not standardised, and the HTTP/JSON one here is our own | none |
 | Interop peers (interop/peer, interop/peer-sa) | the public C++ APIs and example programs of opendnp3 3.1.2 and opendnp3 2.1.0-RC5 (its secauth examples), read to write our peer programs | the peer programs are ours; opendnp3 and standalone asio 1.10.8 are built from their own sources in the test containers; a few opendnp3 source files were read only to explain behaviour seen in the tests (UDPClient.cpp, RestartOperationTask.cpp, OutstationContext.cpp) |
 
 ## Other DNP3 implementations
@@ -92,7 +102,8 @@ used as the SAv5 peer (interop/peer-sa) after the library code existed.
 | outfile_test.go, outstation_test.go | the file transfer examples and the data set examples (5.4.12, 5.4.13) of IEEE 1815-2012 |
 | gaps_test.go (TestDNP3AuthPrimitives) | RFC 3394 section 4 (4.1, 4.3, 4.6), RFC 4231 test case 2, RFC 2202 test case 2 |
 | ostauth_test.go (TestAESGMAC) | the AES-GCM tag of an all-zero key and IV with no data (NIST SP 800-38D test case 1), computed through Go's crypto/cipher |
-| interop/ | opendnp3 3.1.2 as master and outstation (TCP, TLS, UDP, serial); opendnp3 2.1.0-RC5 as SAv5 master and outstation |
+| interop/ | opendnp3 3.1.2 as master and outstation (TCP, TLS, UDP, serial), and on both sides of the gateway (roles_test.go); opendnp3 2.1.0-RC5 as SAv5 master and outstation |
+| v030_test.go, authority_test.go, gateway/, profile/ | this module's master and outstation against each other and the authority service in memory, with expectations from the clauses named above |
 | v020_test.go, session_test.go | this module's master and outstation, and hand-built frames (rawMaster, the fake outstation of TestLinkConfirmWhileFramesArrive) reproducing what opendnp3 sent in the interop tests |
 | every other test and example_test.go | the master and the outstation of this module against each other, written from the same standard; not a real device |
 

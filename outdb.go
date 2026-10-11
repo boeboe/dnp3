@@ -105,6 +105,37 @@ type EventBuffer struct {
 	store    EventStore
 	next     int64
 	notify   func()
+	// typeCap bounds the events of one point type (SetTypeCapacity);
+	// dropOldest makes a full buffer lose its oldest event of the class
+	// (or type) rather than the new one (SetDropOldest).
+	typeCap    map[string]int
+	dropOldest bool
+}
+
+// SetTypeCapacity bounds the buffered events of one point type ("binary",
+// "analog", ...) besides the per-class capacity, as outstations that size
+// their buffers per object type do; n <= 0 removes the bound.
+func (b *EventBuffer) SetTypeCapacity(typ string, n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.typeCap == nil {
+		b.typeCap = map[string]int{}
+	}
+	if n <= 0 {
+		delete(b.typeCap, typ)
+		return
+	}
+	b.typeCap[typ] = n
+}
+
+// SetDropOldest chooses what a full buffer loses: with on, its oldest
+// event of the same class (or point type) makes room for the new one; by
+// default the new event is lost. Either way the overflow is reported
+// (IIN2.3).
+func (b *EventBuffer) SetDropOldest(on bool) {
+	b.mu.Lock()
+	b.dropOldest = on
+	b.mu.Unlock()
 }
 
 // NewEventBuffer makes a buffer with per-class capacities (0: 100 each).
@@ -144,18 +175,46 @@ func (b *EventBuffer) Load(ctx context.Context) error {
 // Add buffers an event; a full class loses the event and sets overflow.
 func (b *EventBuffer) Add(ctx context.Context, e Event) {
 	b.mu.Lock()
-	n := 0
-	for _, x := range b.events {
+	typ := PointTypeOf(e.Group)
+	n, nt, oldestClass, oldestType := 0, 0, -1, -1
+	for i, x := range b.events {
 		if x.Class == e.Class {
 			n++
+			if oldestClass < 0 {
+				oldestClass = i
+			}
+		}
+		if typ != "" && PointTypeOf(x.Group) == typ {
+			nt++
+			if oldestType < 0 {
+				oldestType = i
+			}
 		}
 	}
-	if n >= b.capOf(e.Class) {
+	tcap, typed := b.typeCap[typ]
+	var dropped []int64
+	switch {
+	case n >= b.capOf(e.Class), typed && nt >= tcap:
 		b.overflow = true
-		b.mu.Unlock()
-		return
+		if !b.dropOldest {
+			b.mu.Unlock()
+			return
+		}
+		i := oldestClass
+		if typed && nt >= tcap {
+			i = oldestType
+		}
+		if i >= 0 {
+			if id := b.events[i].ID; id > 0 {
+				dropped = append(dropped, id)
+			}
+			b.events = append(b.events[:i], b.events[i+1:]...)
+		}
 	}
 	b.mu.Unlock()
+	if len(dropped) > 0 && b.store != nil {
+		_ = b.store.Delete(ctx, dropped...)
+	}
 	if b.store != nil {
 		p, _ := json.Marshal(e)
 		if id, err := b.store.Add(ctx, p); err == nil {
@@ -213,11 +272,18 @@ func (b *EventBuffer) Overflow() bool {
 		return false
 	}
 	count := map[int]int{}
+	types := map[string]int{}
 	for _, e := range b.events {
 		count[e.Class]++
+		types[PointTypeOf(e.Group)]++
 	}
 	for c := 1; c <= 3; c++ {
 		if count[c] >= b.capOf(c) {
+			return true
+		}
+	}
+	for t, n := range b.typeCap {
+		if types[t] >= n {
 			return true
 		}
 	}
@@ -385,11 +451,53 @@ func (db *PointDB) Types() []string {
 // the point has an event class and the value (or flags) changed beyond
 // its deadband. It reports whether an event was created.
 func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float64, raw []byte, flags uint8, t time.Time) (bool, error) {
+	return db.UpdateWith(ctx, typ, index, v, raw, flags, t, EventDetect)
+}
+
+// EventMode decides whether an update creates an event.
+type EventMode int
+
+// Event modes of UpdateWith.
+const (
+	// EventDetect creates an event when the value or flags changed beyond
+	// the point's deadband (Update's behaviour).
+	EventDetect EventMode = iota
+	// EventForce creates an event whether or not anything changed (an
+	// event passed on from another device, a momentary change already
+	// over).
+	EventForce
+	// EventSuppress updates the static value without an event.
+	EventSuppress
+	// EventOnly creates an event and leaves the static value as it was
+	// (a historical event reported late).
+	EventOnly
+)
+
+// UpdateFlags changes only a point's flags (and time), keeping its value;
+// an event follows when the flags changed (communication lost, say).
+func (db *PointDB) UpdateFlags(ctx context.Context, typ string, index uint32, flags uint8, t time.Time) (bool, error) {
+	p, ok := db.Point(typ, index)
+	if !ok {
+		return false, fmt.Errorf("%s %d is not defined", typ, index)
+	}
+	return db.UpdateWith(ctx, typ, index, p.Value, p.Raw, flags, t, EventDetect)
+}
+
+// UpdateWith is Update with an event mode.
+func (db *PointDB) UpdateWith(ctx context.Context, typ string, index uint32, v float64, raw []byte, flags uint8, t time.Time, mode EventMode) (bool, error) {
 	db.mu.Lock()
 	p := db.points[typ][index]
 	if p == nil {
 		db.mu.Unlock()
 		return false, fmt.Errorf("%s %d is not defined", typ, index)
+	}
+	if mode == EventOnly {
+		ok := p.Class != 0
+		db.mu.Unlock()
+		if ok {
+			db.emit(ctx, p, typ, index, v, raw, flags, t)
+		}
+		return ok, nil
 	}
 	changed := !p.known || p.Flags != flags
 	switch {
@@ -403,6 +511,15 @@ func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float
 	default:
 		changed = changed || v != p.Value
 	}
+	switch mode {
+	case EventForce:
+		changed = true
+	case EventSuppress:
+		if changed {
+			p.reported = v
+		}
+		changed = false
+	}
 	p.Value, p.Raw, p.Flags, p.Time, p.known = v, raw, flags, t, true
 	if !changed || p.Class == 0 {
 		if changed {
@@ -412,6 +529,14 @@ func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float
 		return false, nil
 	}
 	p.reported = v
+	db.mu.Unlock()
+	db.emit(ctx, p, typ, index, v, raw, flags, t)
+	return true, nil
+}
+
+// emit buffers the event of point p in every association.
+func (db *PointDB) emit(ctx context.Context, p *DBPoint, typ string, index uint32, v float64, raw []byte, flags uint8, t time.Time) {
+	db.mu.Lock()
 	g := pointGroups[typ]
 	ev := p.EventVar
 	if ev == 0 {
@@ -429,7 +554,6 @@ func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float
 	for _, b := range bufs {
 		b.Add(ctx, e)
 	}
-	return true, nil
 }
 
 // AddEvent buffers an event that is not a point change (a data set event,

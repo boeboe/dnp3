@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.0 (2026-10-12)
+
+Added, all backwards compatible:
+
+- Package `gateway`: a data concentrator. Points a master reads from
+  downstream outstations (`Source`, fed by `Source.Data` from
+  `SessionConfig.OnData` and `MasterConfig.OnUnsolicited`) are
+  republished at other indexes in the gateway outstation's `PointDB`;
+  events below become events above with their own time, even when the
+  value is unchanged; mapped CROBs and analog outputs received by the
+  gateway's outstation go down (SELECT as SELECT, OPERATE as a fresh
+  select-and-operate pair so no poll comes between them, DIRECT_OPERATE)
+  and the source's status comes back; `Source.SetOnline(false)` marks
+  the source's points COMM_LOST without ONLINE.
+- Package `profile`: the device profile document in XML from a `PointDB`
+  and device settings (`New`, `Write`), read back (`Read`) and turned
+  into a `PointDB` (`Document.Define`), with names, scaling, units and
+  state names per point.
+- Package `authority`: a reference update key authority (methods 3 to 5
+  and 67 to 69) as a service, with a user register, per-master tokens
+  and outstation lists, the status change sequence number kept per
+  outstation, g120v8 certificates issued for registered users, and an
+  audit log; `authority.Client` is the master's `dnp3.Authority` backed
+  by it. The master–authority protocol (JSON over HTTP) is our own; the
+  standard leaves it open.
+- Point database: `UpdateWith` with event modes (`EventDetect`,
+  `EventForce`, `EventSuppress`, `EventOnly`) and `UpdateFlags`
+  (flags-only changes, value kept).
+- Event buffers: `SetTypeCapacity` (a bound per point type besides the
+  per-class one) and `SetDropOldest` (a full buffer loses its oldest
+  event instead of the new one; the overflow is reported either way).
+- Interop tests against opendnp3 3.1.2 for the new roles: opendnp3's
+  outstation below the gateway and opendnp3's master above it; opendnp3's
+  master reading forced and flags-only events of our outstation.
+
 ## v0.2.0 (2026-10-11)
 
 Interop tests extended to TLS, UDP and serial lines, every object type
