@@ -76,13 +76,42 @@ type Master struct {
 	err  error
 	iin  IIN
 
-	lastReq  []byte    // the latest request fragment as sent (under rmu)
-	sec      Secondary // our secondary station towards the outstation (read loop)
-	prim     Primary   // our primary station for confirmed user data (under wmu)
-	lrOnce   sync.Once
-	linkResp chan Frame
-	lastRx   atomic.Int64  // unix nanoseconds of the latest frame received
-	learned  atomic.Uint32 // with the self-address: the outstation's address + 1
+	lastReq []byte // the latest request fragment as sent (under rmu)
+	// lastAggressive: the latest request went in aggressive mode (rmu).
+	lastAggressive bool
+	sec            Secondary // our secondary station towards the outstation (read loop)
+	prim           Primary   // our primary station for confirmed user data (under wmu)
+	lrOnce         sync.Once
+	linkResp       chan Frame
+	lastRx         atomic.Int64  // unix nanoseconds of the latest frame received
+	learned        atomic.Uint32 // with the self-address: the outstation's address + 1
+
+	// Writes the read loop asks for (link answers, confirmations) go out
+	// in order from their own goroutine: a confirmed-data transaction
+	// holds wmu until the read loop has seen its acknowledgement.
+	aqOnce sync.Once
+	aq     chan func()
+}
+
+// fromReadLoop queues a write the read loop needs, keeping their order.
+func (m *Master) fromReadLoop(f func()) {
+	m.aqOnce.Do(func() {
+		m.aq = make(chan func(), 64)
+		go func() {
+			for {
+				select {
+				case f := <-m.aq:
+					f()
+				case <-m.done:
+					return
+				}
+			}
+		}()
+	})
+	select {
+	case m.aq <- f:
+	case <-m.done:
+	}
 }
 
 // LearnedAddress is the outstation's own address, learnt from its answer
@@ -282,7 +311,8 @@ func (m *Master) frame(f Frame, ra *Reassembler) {
 	}
 	act := m.sec.Handle(f)
 	if act.Respond {
-		m.sendLink(act.Func, nil)
+		fn := act.Func
+		m.fromReadLoop(func() { m.sendLink(fn, nil) })
 	}
 	if !act.Deliver {
 		return
@@ -333,11 +363,17 @@ func isAggressive(f Fragment) bool {
 // when it ends with a challenge) and hands it over.
 func (m *Master) deliverUnsolicited(frag Fragment) {
 	if frag.Control&AppCON != 0 {
-		if frag2, ok := m.aggressiveConfirm(frag, true); ok {
-			frag = frag2
-		} else {
-			m.confirm(frag.Seq(), true)
+		orig := frag
+		if m.cfg.Auth != nil {
+			if _, rest, ok := trailingChallenge(frag.Objects); ok {
+				frag.Objects = rest
+			}
 		}
+		m.fromReadLoop(func() {
+			if _, ok := m.aggressiveConfirm(orig, true); !ok {
+				m.confirm(orig.Seq(), true)
+			}
+		})
 	}
 	if m.cfg.OnUnsolicited != nil {
 		m.cfg.OnUnsolicited(frag)
@@ -642,6 +678,17 @@ func (m *Master) SelectOperate(ctx context.Context, objects []byte, within time.
 // (a rekey, or ErrAuthLimit ending the session).
 func (m *Master) request(ctx context.Context, fc byte, objects []byte) ([]Fragment, error) {
 	frags, err := m.request1(ctx, fc, objects)
+	var rej *RejectedError
+	if a := m.cfg.Auth; a != nil && m.lastAggressive && errors.As(err, &rej) && rej.IIN&(IINObjectUnknown|IINParameterError) != 0 {
+		// An outstation that does not take aggressive mode reads g120v3
+		// as an unknown or malformed object instead of answering with
+		// the "aggressive mode not supported" error (opendnp3's
+		// experimental SAv5 does this): the request was not carried out.
+		// Stop using aggressive mode with it and send it normally.
+		m.cfg.Log.Warn("DNP3 outstation refused an aggressive-mode request; using challenges only", "function", FuncName(fc), "iin", rej.IIN.String())
+		a.refuseAggressive()
+		frags, err = m.request1(ctx, fc, objects)
+	}
 	if a := m.cfg.Auth; a != nil {
 		if lerr := a.limitAction(); lerr != nil {
 			return frags, lerr
@@ -678,6 +725,7 @@ func (m *Master) request1(ctx context.Context, fc byte, objects []byte) ([]Fragm
 			sent, aggressive = b, true
 		}
 	}
+	m.lastAggressive = aggressive
 	if len(sent) > max {
 		return nil, fmt.Errorf("the %s request is %d octets; at most %d are sent in one fragment", FuncName(fc), len(sent), max)
 	}

@@ -16,12 +16,26 @@ import (
 	"time"
 )
 
-// image is the reference peers' image, built from ./peer.
-const image = "sigma-dnp3-interop:opendnp3-3.1.2"
+// image is the reference peers' image, built from ./peer; saImage the
+// Secure Authentication peers' image, built from ./peer-sa.
+const (
+	image   = "sigma-dnp3-interop:opendnp3-3.1.2"
+	saImage = "sigma-dnp3-interop:opendnp3-2.1.0-rc5-sa"
+)
+
+var buildMu sync.Mutex
+var built = map[string]bool{}
 
 // needDocker skips the test unless SIGMA_DNP3_INTEROP=1 is set and Docker
-// answers, and builds the peer image when it is missing.
+// answers, and builds the peer image (once per run; Docker's cache makes
+// an unchanged build quick).
 func needDocker(t *testing.T) {
+	t.Helper()
+	needImage(t, image, "peer")
+}
+
+// needImage is needDocker for an image built from dir.
+func needImage(t *testing.T, img, dir string) {
 	t.Helper()
 	if os.Getenv("SIGMA_DNP3_INTEROP") != "1" {
 		t.Skip("set SIGMA_DNP3_INTEROP=1 to run the interop tests (needs Docker)")
@@ -32,13 +46,16 @@ func needDocker(t *testing.T) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("docker is not running")
 	}
-	if exec.Command("docker", "image", "inspect", image).Run() == nil {
+	buildMu.Lock()
+	defer buildMu.Unlock()
+	if built[img] {
 		return
 	}
-	out, err := exec.Command("docker", "build", "-q", "-t", image, "peer").CombinedOutput()
+	out, err := exec.Command("docker", "build", "-q", "-t", img, dir).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker build: %v\n%s", err, out)
 	}
+	built[img] = true
 }
 
 // freePort returns a TCP port free on the loopback interface.
@@ -142,6 +159,63 @@ func (p *peer) expect(within time.Duration, parts ...string) string {
 			return ""
 		}
 	}
+}
+
+// until collects the "PEER " lines up to and including the first one
+// containing stop.
+func (p *peer) until(within time.Duration, stop string) []string {
+	p.t.Helper()
+	var out []string
+	deadline := time.After(within)
+	for {
+		select {
+		case l := <-p.lines:
+			out = append(out, l)
+			if strings.Contains(l, stop) {
+				return out
+			}
+		case <-deadline:
+			p.t.Fatalf("no peer line with %q within %s", stop, within)
+			return nil
+		}
+	}
+}
+
+// expectAll waits for lines matching each set of parts, in any order.
+func (p *peer) expectAll(within time.Duration, sets ...[]string) {
+	p.t.Helper()
+	left := append([][]string(nil), sets...)
+	deadline := time.After(within)
+	for len(left) > 0 {
+		select {
+		case l := <-p.lines:
+			for i, s := range left {
+				if has([]string{l}, s...) {
+					left = append(left[:i], left[i+1:]...)
+					break
+				}
+			}
+		case <-deadline:
+			p.t.Fatalf("no peer lines with %q within %s", left, within)
+		}
+	}
+}
+
+// has reports whether one of lines contains all the parts.
+func has(lines []string, parts ...string) bool {
+	for _, l := range lines {
+		ok := true
+		for _, part := range parts {
+			if !strings.Contains(l, part) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // drain discards the lines received so far.

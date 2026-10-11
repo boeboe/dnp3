@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goburrow/serial"
@@ -204,7 +205,48 @@ func (m *memberConn) SetWriteDeadline(t time.Time) error {
 // or "O"). The master and the outstation's serial channel use it; tests,
 // or an application that reaches its ports another way, replace it.
 var OpenSerial = func(dev string, baud int, parity string) (io.ReadWriteCloser, error) {
-	return serial.Open(&serial.Config{Address: dev, BaudRate: baud, DataBits: 8, StopBits: 1, Parity: parity, Timeout: 200 * time.Millisecond})
+	p, err := serial.Open(&serial.Config{Address: dev, BaudRate: baud, DataBits: 8, StopBits: 1, Parity: parity, Timeout: 200 * time.Millisecond})
+	if err != nil {
+		return nil, err
+	}
+	return &lockedPort{p: p}, nil
+}
+
+// lockedPort lets a serial port be closed while another goroutine reads
+// it: goburrow/serial's Close resets the descriptor that a Read in
+// progress uses. Close waits for that Read to return (its read timeout
+// bounds the wait); later reads and writes fail.
+type lockedPort struct {
+	p      io.ReadWriteCloser
+	mu     sync.RWMutex
+	closed atomic.Bool
+}
+
+func (l *lockedPort) Read(b []byte) (int, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	return l.p.Read(b)
+}
+
+func (l *lockedPort) Write(b []byte) (int, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	return l.p.Write(b)
+}
+
+func (l *lockedPort) Close() error {
+	if l.closed.Swap(true) {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.p.Close()
 }
 
 // SerialParams reads a serial URL (serial:///dev/ttyS1?baud=9600&parity=N):

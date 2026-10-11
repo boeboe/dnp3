@@ -95,6 +95,10 @@ type OutstationConfig struct {
 	UnsolRetries int
 	UnsolHold    time.Duration
 	UnsolCount   int
+	// UnsolOffline is the pause after a series that ended without a
+	// confirmation (its retries used up) before a new series carries the
+	// events still buffered (default: ConfirmTimeout).
+	UnsolOffline time.Duration
 	// NeedTime sets IIN1.4 at start and again this long after each
 	// synchronisation; 0 never asks for time.
 	NeedTime time.Duration
@@ -195,6 +199,9 @@ func NewAssociation(cfg OutstationConfig) *Association {
 	}
 	if cfg.SelectTimeout <= 0 {
 		cfg.SelectTimeout = 5 * time.Second
+	}
+	if cfg.UnsolOffline <= 0 {
+		cfg.UnsolOffline = cfg.ConfirmTimeout
 	}
 	if cfg.MaxControls <= 0 {
 		cfg.MaxControls = 16
@@ -415,7 +422,7 @@ func (a *Association) Run(ctx context.Context) {
 	if a.cfg.NeedTime > 0 {
 		a.needTime = true
 	}
-	var unsolTimer <-chan time.Time
+	var unsolTimer, offlineTimer <-chan time.Time
 	var unsol *unsolState
 	var deferred []inbound
 	var sol *solState
@@ -534,6 +541,7 @@ func (a *Association) Run(ctx context.Context) {
 				// Rule 16: a read waits; the series ends at the timeout.
 				unsol, unsolTimer = nil, nil
 				a.useq = (a.useq + 1) & 0x0F
+				offlineTimer = time.After(a.cfg.UnsolOffline)
 				continue
 			}
 			if unsol.null || unsol.retries != 0 {
@@ -544,8 +552,18 @@ func (a *Association) Run(ctx context.Context) {
 				unsolTimer = time.After(a.cfg.ConfirmTimeout)
 				continue
 			}
+			// The series ends unconfirmed; its events stay buffered and a
+			// new series carries them after the offline interval.
 			unsol, unsolTimer = nil, nil
 			a.useq = (a.useq + 1) & 0x0F
+			offlineTimer = time.After(a.cfg.UnsolOffline)
+		case <-offlineTimer:
+			offlineTimer = nil
+			if unsol == nil && sol == nil {
+				startUnsol(false)
+			} else {
+				a.poke()
+			}
 		case <-a.wake:
 			if unsol != nil || sol != nil {
 				continue
@@ -908,6 +926,9 @@ func isFileTransport(objs []byte) bool {
 // staticChunks encodes the points of a type (all, or those in idx),
 // consecutive indexes of one variation per header.
 func (a *Association) staticChunks(typ string, variation uint8, idx func(uint32) bool, class0 bool) []chunk {
+	if typ == "virtual-terminal" {
+		return nil // ports have no static value
+	}
 	g := pointGroups[typ][0]
 	var pts []DBPoint
 	for _, p := range a.cfg.DB.Points(typ) {
@@ -953,6 +974,9 @@ func (a *Association) staticChunks(typ string, variation uint8, idx func(uint32)
 			pt := Point{Index: p.Index, Value: p.Value, Flags: p.Flags, HasFlags: true, Time: p.Time, Raw: p.Raw}
 			if typ == "frozen-counter" || typ == "frozen-analog" {
 				pt.Time = p.Time
+			}
+			if typ == "time-and-interval" {
+				pt = Point{Index: p.Index, Value: p.Time, Interval: uint32(p.Value), Units: p.Units}
 			}
 			ps = append(ps, pt)
 		}
@@ -1243,7 +1267,8 @@ func (a *Association) read(objs []byte) ([]chunk, IIN) {
 				takeEvents(evs)
 				continue
 			}
-			if h.Var != 0 && !Known(h.Group, h.Var) && typ != "octet-string" {
+			if (h.Var != 0 && !Known(h.Group, h.Var) && typ != "octet-string") || (typ == "time-and-interval" && h.Var != 0 && h.Var != 4) ||
+				typ == "virtual-terminal" {
 				iin |= IINObjectUnknown
 				continue
 			}
@@ -1392,6 +1417,10 @@ func (a *Association) write(ctx context.Context, objs []byte, in inbound) IIN {
 			a.needTime, a.timeAt = false, time.Now()
 			a.clockOffset = time.Until(now)
 			a.cfg.Handler.TimeSet(now)
+		case h.Group == 50 && h.Var == 4:
+			iin |= a.writeTimeAndInterval(ctx, b)
+		case h.Group == 112:
+			iin |= a.writeVirtualTerminal(ctx, b)
 		case h.Group == 34:
 			for _, p := range b.Points {
 				v, _ := p.Value.(float64)

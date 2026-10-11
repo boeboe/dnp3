@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -272,6 +271,14 @@ type handler struct {
 	mu       sync.Mutex
 	controls []dnp3.ControlRequest
 	times    []time.Time
+	restarts []bool // cold
+	tis      []dnp3.TimeAndInterval
+}
+
+func (h *handler) TimeAndIntervalWritten(_ context.Context, ti dnp3.TimeAndInterval) {
+	h.mu.Lock()
+	h.tis = append(h.tis, ti)
+	h.mu.Unlock()
 }
 
 func (h *handler) Control(_ context.Context, c dnp3.ControlRequest) uint8 {
@@ -281,7 +288,15 @@ func (h *handler) Control(_ context.Context, c dnp3.ControlRequest) uint8 {
 	return 0
 }
 func (*handler) DataSetControl(context.Context, dnp3.DataSetControl) uint8 { return 4 }
-func (*handler) Restart(context.Context, bool) time.Duration               { return 0 }
+func (h *handler) Restart(_ context.Context, cold bool) time.Duration {
+	h.mu.Lock()
+	h.restarts = append(h.restarts, cold)
+	h.mu.Unlock()
+	if cold {
+		return 1500 * time.Millisecond
+	}
+	return 3 * time.Second
+}
 func (*handler) Activate(context.Context, [][]byte) dnp3.ActivateStatus {
 	return dnp3.ActivateStatus{}
 }
@@ -299,50 +314,6 @@ func (h *handler) snapshot() ([]dnp3.ControlRequest, []time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]dnp3.ControlRequest(nil), h.controls...), append([]time.Time(nil), h.times...)
-}
-
-// outstation serves this module's outstation on a loopback port.
-func outstation(t *testing.T) (*dnp3.PointDB, *handler, int) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	db := dnp3.NewPointDB()
-	for i := uint32(0); i < 3; i++ {
-		for _, p := range []dnp3.DBPoint{
-			{Type: "binary", Index: i, Class0: true, Class: 1, Flags: 0x01},
-			{Type: "analog", Index: i, Class0: true, Class: 2, Flags: 0x01},
-			{Type: "counter", Index: i, Class0: true, Class: 3, Flags: 0x01},
-			{Type: "binary-output", Index: i, Class0: true, Flags: 0x01},
-			{Type: "analog-output", Index: i, Class0: true, Flags: 0x01},
-		} {
-			if err := db.Define(p); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	_, _ = db.Update(ctx, "binary", 0, 1, nil, 0x01, time.Now())
-	_, _ = db.Update(ctx, "analog", 0, 230.5, nil, 0x01, time.Now())
-	_, _ = db.Update(ctx, "counter", 0, 42, nil, 0x01, time.Now())
-	h := &handler{}
-	a := dnp3.NewAssociation(dnp3.OutstationConfig{Address: 10, Master: 1, DB: db, Handler: h, Unsolicited: true, NeedTime: time.Hour})
-	n := &dnp3.OutstationNet{}
-	n.Add(a)
-	go a.Run(ctx)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go n.ServeStream(ctx, c)
-		}
-	}()
-	return db, h, ln.Addr().(*net.TCPAddr).Port
 }
 
 // TestOpendnp3MasterAgainstOutstation: opendnp3's master runs its start-up

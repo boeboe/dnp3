@@ -31,12 +31,15 @@ var pointGroups = map[string][2]uint8{
 	"binary": {1, 2}, "double": {3, 4}, "binary-output": {10, 11}, "counter": {20, 22}, "frozen-counter": {21, 23},
 	"analog": {30, 32}, "frozen-analog": {31, 33}, "analog-output": {40, 42}, "octet-string": {110, 111},
 	"security-statistic": {121, 122},
+	"time-and-interval":  {50, 0},    // g50v4, no events (timeinterval.go)
+	"virtual-terminal":   {112, 113}, // ports (vterm.go): g112 written, g113 events
+
 }
 
 // PointTypeOf is the point type of a static or event group.
 func PointTypeOf(group uint8) string {
 	for t, g := range pointGroups {
-		if g[0] == group || g[1] == group {
+		if g[0] == group || (g[1] != 0 && g[1] == group) {
 			return t
 		}
 	}
@@ -47,6 +50,7 @@ func PointTypeOf(group uint8) string {
 var defaultVars = map[string][2]uint8{
 	"binary": {2, 2}, "double": {2, 2}, "binary-output": {2, 2}, "counter": {1, 5}, "frozen-counter": {1, 5},
 	"analog": {5, 7}, "frozen-analog": {7, 7}, "analog-output": {3, 7}, "security-statistic": {1, 2},
+	"time-and-interval": {4, 0},
 }
 
 // DBPoint is one point of the outstation database.
@@ -61,10 +65,13 @@ type DBPoint struct {
 	Class     int     // event class 1 to 3, 0: no events
 	StaticVar uint8   // 0: the type's default
 	EventVar  uint8   // 0: the type's default
-	Deadband  float64 // analog: an event needs a change larger than this
+	Deadband  float64 // analogs, counters: an event needs a change larger than this
 	Frozen    float64 // counters: the value at the last freeze
-	known     bool
-	reported  float64 // value of the last event (for deadbands)
+	// Units is the interval's units code of a time-and-interval point
+	// (whose Time is its start and Value its interval count).
+	Units    uint8
+	known    bool
+	reported float64 // value of the last event (for deadbands)
 }
 
 // Event is one buffered event.
@@ -308,6 +315,9 @@ func (db *PointDB) Define(p DBPoint) error {
 	if p.Class < 0 || p.Class > 3 {
 		return errors.New("an event class is 0 to 3")
 	}
+	if p.Type == "time-and-interval" && p.Class != 0 {
+		return errors.New("time-and-interval points have no events (class 0)")
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.points[p.Type] == nil {
@@ -383,9 +393,12 @@ func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float
 	}
 	changed := !p.known || p.Flags != flags
 	switch {
+	case typ == "virtual-terminal":
+		changed = true // every output is an event, repeated or not
 	case raw != nil:
 		changed = changed || string(raw) != string(p.Raw)
-	case typ == "analog" || typ == "analog-output" || typ == "frozen-analog":
+	case typ == "analog" || typ == "analog-output" || typ == "frozen-analog",
+		(typ == "counter" || typ == "frozen-counter") && p.Deadband > 0:
 		changed = changed || math.Abs(v-p.reported) > p.Deadband || (p.Deadband == 0 && v != p.reported)
 	default:
 		changed = changed || v != p.Value
@@ -404,7 +417,7 @@ func (db *PointDB) Update(ctx context.Context, typ string, index uint32, v float
 	if ev == 0 {
 		ev = defaultVars[typ][1]
 	}
-	if typ == "octet-string" {
+	if typ == "octet-string" || typ == "virtual-terminal" {
 		ev = uint8(len(raw))
 	}
 	e := Event{Class: p.Class, Group: g[1], Var: ev, Index: index, Value: v, Raw: raw, Flags: flags, Time: t}

@@ -272,7 +272,12 @@ func Time48(b []byte) time.Time {
 
 // AppendTime48 appends t as a time48.
 func AppendTime48(out []byte, t time.Time) []byte {
-	ms := uint64(t.UnixMilli())
+	// DNP3 time counts from 1970: a time never set (the zero time.Time)
+	// or before 1970 goes out as 0 rather than wrapped around.
+	var ms uint64
+	if v := t.UnixMilli(); v > 0 {
+		ms = uint64(v)
+	}
 	for i := range 6 {
 		out = append(out, byte(ms>>(8*i)))
 	}

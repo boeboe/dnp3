@@ -33,7 +33,10 @@ outstation integrations.
 | Secure Authentication v6 | no |
 | Broadcast | outstation: per function code, critical requests only in verified aggressive mode under SA; master: never sends |
 | Device profile document (XML) | no (an application's own) |
-| A polling scheduler and a measurement model on the master | no: the master is request-level (`Request`, `SelectOperate`); scheduling and mapping are the application's |
+| Time-and-interval points (g50v4): class 0, reads, master writes | yes |
+| Deadbands on analogs, analog outputs, counters and frozen counters | yes |
+| A polling session on the master (`RunSession`): start-up sequence, periodic integrity polls and class scans, polls on IIN1.1 to 1.3, LAN or non-LAN time synchronisation when asked, start-up again after a restart | yes; requests of the application's own (controls, files) take turns with it |
+| A measurement model on the master (mapping points to names and units) | no: the application's |
 
 Security services come in through
 [iotsec](https://github.com/cB-Sigma/iotsec): a TLS client or server
@@ -55,21 +58,23 @@ row.
 | Licence | Apache-2.0 | Apache-2.0 | non-commercial and non-production only; commercial licence for sale | |
 | Maintained | yes | no release since 2022 | yes | |
 | Master and outstation | both (tested against opendnp3) | both | both | |
-| TCP, TLS, UDP, serial | all four | all four (TLS through OpenSSL) | all four (TLS through rustls) | |
-| Secure Authentication v5 | yes, both sides | no (an experimental version was moved out in 2.1.0) | no | |
-| File transfer | both sides | no | master: read and write files, directories | |
+| TCP, TLS, UDP, serial | all four, each tested against opendnp3 both ways | all four (TLS through OpenSSL) | all four (TLS through rustls) | |
+| Secure Authentication v5 | yes, both sides (tested against opendnp3 2.1.0-RC5's experimental SAv5) | no (an experimental version, in tags 2.1.0-RC1 to RC5, was moved out in RC6) | no | |
+| File transfer | both sides | no (group 70 is only named) | master: read and write files, directories | |
 | Device attributes (group 0) | yes | no | yes | |
 | Data sets (groups 85 to 88) | yes | no | no | |
-| Master scheduling (periodic scans, start-up sequence, automatic time sync) | no, request-level | yes | yes | |
+| Virtual terminal (groups 112, 113) | yes: codec, outstation ports | no (objects named only) | no | |
+| Time-and-interval points (g50v4) | yes (tested against opendnp3) | yes | not checked | |
+| Master scheduling (periodic scans, start-up sequence, automatic time sync) | yes (`RunSession`; tested against opendnp3) | yes | yes | |
 | Event database with per-point configuration | yes (`PointDB`) | yes | yes | |
 | Simulated outstation for tests | yes ([dnp3-sim](https://github.com/cB-Sigma/dnp3-sim)), with two vendor presets | demo programs | example programs | |
 
 Pick this module for a Go program, for Secure Authentication v5, or for
-file transfer and data sets on both sides. Pick stepfunc dnp3 when you
-can buy its commercial licence and want a maintained, scheduled master
-with bindings for several languages. Pick opendnp3 for a C++ or .NET
-code base that already uses it and does not need Secure Authentication;
-it is no longer released. A Go master or outstation other than this one
+file transfer, data sets and virtual terminal ports on both sides. Pick
+stepfunc dnp3 when you can buy its commercial licence and want bindings
+for several languages. Pick opendnp3 for a C++ or .NET code base that
+already uses it and does not need Secure Authentication; it is no
+longer released. A Go master or outstation other than this one
 was not found (the Go DNP3 code that turns up in searches is scanner
 plugins that send one link-status request).
 
@@ -96,6 +101,15 @@ latch, _ := dnp3.EncodeBlock(12, 1, dnp3.Q8Index8, []dnp3.Point{{Index: 0, CROB:
 err = m.SelectOperate(ctx, latch, 5*time.Second, nil)
 ```
 
+A polling session (start-up sequence, scans, time synchronisation) in
+place of hand-made requests:
+
+```go
+go m.RunSession(ctx, dnp3.SessionConfig{Unsolicited: []int{1, 2, 3}, TimeSync: dnp3.TimeSyncLAN,
+	Integrity: time.Hour, Scans: []dnp3.ClassScan{{Classes: []int{1}, Period: 5 * time.Second}},
+	OnData: func(f dnp3.Fragment) { /* ParseObjects(f.Objects, true) */ }})
+```
+
 With Secure Authentication, and TLS from crypto/tls (or an IEC 62351-3
 profile implementing `iotsec.TLSClient`):
 
@@ -117,7 +131,7 @@ API reference: https://pkg.go.dev/github.com/cB-Sigma/dnp3
 | Package | What it does |
 |---|---|
 | `dnp3` (module root) | Frames, segments and fragments; object encoding (`EncodeBlock`, `ParseObjects`); the master (`Dial`, `OpenChannel`, `Master.Request`, `SelectOperate`, `ChangeSessionKeys`, `ChangeUpdateKey`); the outstation (`PointDB`, `NewAssociation`, `OutstationNet`); Secure Authentication v5 (`NewAuth`, `NewOutstationAuth`); file transfer, data sets, device attributes |
-| `interop` (nested module, tests only) | this module's master and outstation against opendnp3 in Docker |
+| `interop` (nested module, tests only) | this module's master and outstation against opendnp3 3.1.2 and, for Secure Authentication v5, opendnp3 2.1.0-RC5, in Docker |
 
 ## Testing
 
@@ -134,42 +148,83 @@ PROVENANCE.md explains them. The tests that drive the simulated
 outstation are in [dnp3-sim](https://github.com/cB-Sigma/dnp3-sim), so
 this module does not depend on its simulator.
 
-`interop/` is a nested module with its own go.mod. It builds opendnp3
-3.1.2 and two small programs on it (`interop/peer`) in a Debian
-container and runs this module against them. It is skipped unless
+`interop/` is a nested module with its own go.mod. It builds two
+reference images in Docker and runs this module against them: opendnp3
+3.1.2 with OpenSSL (TLS) and socat (`interop/peer`), and opendnp3
+2.1.0-RC5, the last opendnp3 tag that carried its experimental Secure
+Authentication v5 module, on Debian 9 with OpenSSL 1.0.2
+(`interop/peer-sa`). The peer programs are ours; opendnp3 is built from
+its own sources inside the containers. The tests are skipped unless
 `SIGMA_DNP3_INTEROP=1` is set and Docker is running:
 
 ```
-cd interop && SIGMA_DNP3_INTEROP=1 go test -v ./...
+cd interop && SIGMA_DNP3_INTEROP=1 go test -race -v ./...
 ```
 
 ### Interop tested against
 
-opendnp3 3.1.2 (Apache-2.0), built from source in Docker, on
-2026-10-11:
+Run on 2026-10-11 on macOS with Docker Desktop; every item below passed.
 
-- This module's master against opendnp3's outstation (TCP): integrity
-  poll (g1v2, g3v2, g10v2, g20v1, g21v1, g30v5, g40v1, g50v4, g110v1
-  decoded), clearing the restart indication, non-LAN and LAN time
-  synchronisation (the outstation's clock within 1 ms of the written
-  time, IIN1.4 cleared), class 1, 2 and 3 polls returning only their
-  class's events (g2v2, g32v5, g22v1), events cleared by our
-  confirmation, unsolicited responses enabled and confirmed, CROB
-  select-before-operate and direct operate, analog output (g41v3)
-  select-before-operate. All passed.
-- opendnp3's master against this module's outstation (TCP), in non-LAN
-  and LAN time-sync modes: opendnp3's start-up sequence (disable
-  unsolicited, our null unsolicited response confirmed, clear restart,
-  integrity poll, time synchronisation, enable unsolicited), an
-  unsolicited event confirmed by opendnp3, integrity and class polls,
-  CROB select-before-operate and direct operate, analog output
-  select-before-operate, each reported SUCCESS by opendnp3. All passed.
-- Not tested against a reference: Secure Authentication v5 (opendnp3
-  3.x and stepfunc dnp3 do not implement it), TLS, UDP, serial lines,
-  file transfer, data sets. stepfunc dnp3 was not run: its licence
-  allows only non-commercial, non-production use.
+opendnp3 3.1.2 (Apache-2.0), this module's master against opendnp3's
+outstation:
+
+| Area | What was checked |
+|---|---|
+| Channels | TCP; TLS 1.2 and TLS 1.3 with mutual certificates (crypto/tls against OpenSSL), and the connection refused when our certificate comes from a CA the outstation does not trust; UDP from a fixed local port; a serial line: this module opens a real pty whose bytes reach opendnp3's serial channel on its own pty through socat |
+| Static data | integrity poll with g1v2, g3v2, g10v2, g20v1, g21v5, g30v5, g40v3, g50v4, g110 (every type, decoded and checked); an integrity poll split by opendnp3 into fragments of at most 249 octets, each confirmed |
+| Events | g2v2, g2v3 and g4v3 after a common time of occurrence (g51), g4v2, g11v2, g22v1, g22v5, g23v5, g32v5, g32v7, g42v5, g42v7, g111; times within 5 s of the change; class polls return only their class; events cleared by our confirmation |
+| Unsolicited | enabled and confirmed; with our first confirmation dropped by a proxy, opendnp3 repeats the response with the same sequence number, we confirm the repeat and the event is cleared |
+| Functions | clear restart; non-LAN and LAN time synchronisation (to the millisecond, IIN1.4 cleared); immediate freeze, freeze and clear, freeze without response; cold and warm restart (g52v2 1500 ms, g52v1 3 s); assign class; WRITE of g50v4 |
+| Controls | CROB select-before-operate, direct operate and pulse (count, on and off times); analog outputs g41v1, g41v2, g41v3 and g41v4; a CROB and an analog output in one select-before-operate |
+| Link layer | confirmed user data (one link reset, FCB alternating, every frame acknowledged); REQUEST_LINK_STATUS both ways (our keep-alive answered, opendnp3's answered by us) |
+| Polling session | `RunSession` start-up (disable unsolicited, clear restart, integrity, LAN or non-LAN time synchronisation, enable unsolicited), unsolicited events, a periodic class 3 scan |
+
+opendnp3 3.1.2, opendnp3's master against this module's outstation:
+
+| Area | What was checked |
+|---|---|
+| Channels | TCP; TLS 1.2 and 1.3 (OpenSSL client, our crypto/tls server requiring client certificates); UDP; a serial line on a real pty here |
+| Start-up | opendnp3's sequence in non-LAN and LAN time-sync modes: disable unsolicited, our null unsolicited response confirmed, clear restart, integrity poll, time synchronisation, enable unsolicited |
+| Data | static g1v2, g3v2, g10v2, g20v1, g21v1, g30v5, g40v3, g50v4, g110; unsolicited events g2v2, g4v2, g11v2, g22v5, g42v7, g111 with their times to the millisecond; frozen counters after IMMED_FREEZE, FREEZE_CLEAR and IMMED_FREEZE_NR, read back as g21 |
+| Functions | WRITE of g50v4 and a range read of it; cold and warm restart; integrity and class polls |
+| Controls | CROB select-before-operate, direct operate and pulse; analog outputs g41v1 to g41v4; a CROB and an analog output in one request; each reported SUCCESS by opendnp3 and seen by our handler with the values sent |
+| Link layer and loss | opendnp3's REQUEST_LINK_STATUS keep-alive answered; with opendnp3's confirmation of our unsolicited response dropped, we repeat it with the same sequence number and the event is cleared once confirmed |
+
+opendnp3 2.1.0-RC5 (Apache-2.0; its SAv5 module was marked experimental),
+Secure Authentication v5:
+
+| Direction | What was checked |
+|---|---|
+| Our master, opendnp3's outstation | session key status and session key change; challenges of critical requests answered with HMAC-SHA-256/16, HMAC-SHA-256/8, HMAC-SHA-1/10 and HMAC-SHA-1/8; AES-128 and AES-256 key wrap; direct operate and select-before-operate carried out after the challenge; every request challenged (the outstation's "authenticate everything" setting); a wrong update key refused with error 1 |
+| opendnp3's master, our outstation | opendnp3's session key change, start-up and integrity poll; a CROB direct operate and an analog output challenged by us, answered by opendnp3 and carried out for user 1; MAC algorithms HMAC-SHA-256/16, HMAC-SHA-1/10, HMAC-SHA-256/8; AES-128 and AES-256 key wrap |
+| Aggressive mode | opendnp3's outstation does not take aggressive mode: it challenges the request and then refuses its g120v3 object with IIN2.2. Our master falls back to challenges at once and the operation is carried out exactly once (tested). Aggressive mode itself is checked only against this module's own outstation |
+
+Defects of the reference peers met on the way (not ours; recorded so
+nobody chases them): opendnp3 3.1.2's master reads g52v1 (seconds) as
+milliseconds when reporting a restart time; its UDP channel loses its
+bound local port when the remote is given as a host name (asio's range
+connect reopens the socket), so the peer programs resolve names first;
+its master reports g111 octet string events with the event flag clear.
+
+Not tested against an independent implementation:
+
+- File transfer (group 70): opendnp3 only names the objects; stepfunc
+  dnp3 (master only) was not run because of its licence.
+- Data sets (groups 85 to 88), device attributes (group 0), virtual
+  terminal ports: neither opendnp3 version implements them.
+- Secure Authentication update key change (symmetric and asymmetric),
+  g120v8 user certificates and aggressive mode: opendnp3 2.1.0-RC5 has
+  a symmetric update key change on its master, not run here; only this
+  module's own master and outstation exercise them.
+- Real serial hardware (ptys and socat stand in), multi-drop serial
+  lines with several outstations, IPv6.
+- stepfunc dnp3 was not run: its licence allows only non-commercial,
+  non-production use.
 - In process: the simulated outstation and the vendor presets of
   dnp3-sim (same author, so not independent).
+
+Defects of this module found by these tests and fixed in v0.2.0 are in
+CHANGELOG.md.
 
 ## Related repositories
 

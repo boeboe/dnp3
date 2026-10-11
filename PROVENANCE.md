@@ -17,7 +17,11 @@ on idle TLS links and the UDP reply-port fix on 2026-10-06). It became a
 module of its own on 2026-10-06. On 2026-10-11 the simulated outstation,
 its command and the tests that drive it moved to the separate module
 dnp3-sim, so this module does not depend on its simulator, and the
-opendnp3 interop tests (interop/) were added.
+opendnp3 interop tests (interop/) were added. Version 0.2.0 (2026-10-11)
+added the polling session (session.go), time-and-interval points
+(timeinterval.go), virtual terminal ports (vterm.go) and counter
+deadbands, and fixed the defects the extended interop tests found
+(CHANGELOG.md).
 
 ## Notes on open readings (F- numbers)
 
@@ -50,7 +54,8 @@ are in dnp3-sim, which holds the presets.
 | Secure Authentication v5 (auth.go, ostauth.go, updatekey.go, gmac.go, events.go) | clause 7 and Annex A.45 to A.47; RFC 3394 (AES key wrap); RFC 2104 (HMAC); NIST SP 800-38D (GCM, for AES-GMAC) | none |
 | User certificates (usercert.go) | IEEE 1815-2012 A.45.8 (g120v8); IEC 62351-8 for the IECUserRoles extension OIDs (the token itself is read by the caller's iotsec.RoleAuthority) | none |
 | Serial lines (channel.go) | none (URL parameters are our own) | github.com/goburrow/serial is a dependency, not a source |
-| Interop peers (interop/peer) | opendnp3 3.1.2's public C++ API and its example programs, read to write our two peer programs | the peer programs are ours; opendnp3 is built from its own sources in the test container |
+| Polling session (session.go), time-and-interval points (timeinterval.go), virtual terminal ports (vterm.go) | IEEE 1815-2012 clauses 4 and 5 (start-up, class polls, time synchronisation procedures), Annex A (g50v4, g112, g113) | none; the session's task order matches what opendnp3's master does at start-up, observed as a peer, not read from its code |
+| Interop peers (interop/peer, interop/peer-sa) | the public C++ APIs and example programs of opendnp3 3.1.2 and opendnp3 2.1.0-RC5 (its secauth examples), read to write our peer programs | the peer programs are ours; opendnp3 and standalone asio 1.10.8 are built from their own sources in the test containers; a few opendnp3 source files were read only to explain behaviour seen in the tests (UDPClient.cpp, RestartOperationTask.cpp, OutstationContext.cpp) |
 
 ## Other DNP3 implementations
 
@@ -73,6 +78,12 @@ was not built or run, because its licence restricts use to
 non-commercial, non-production purposes; its public README and change
 log were read for the comparison in README.md.
 
+For Secure Authentication v5 an open peer was looked for: pydnp3 wraps
+opendnp3 3.x and has none; opendnp3's history shows an experimental
+SAv5 module in tags 2.1.0-RC1 to 2.1.0-RC5 (Apache-2.0), moved to a
+"secauth" branch in RC6 that is no longer published. RC5 was built and
+used as the SAv5 peer (interop/peer-sa) after the library code existed.
+
 ## Test vectors and where they come from
 
 | Test | Source |
@@ -81,7 +92,8 @@ log were read for the comparison in README.md.
 | outfile_test.go, outstation_test.go | the file transfer examples and the data set examples (5.4.12, 5.4.13) of IEEE 1815-2012 |
 | gaps_test.go (TestDNP3AuthPrimitives) | RFC 3394 section 4 (4.1, 4.3, 4.6), RFC 4231 test case 2, RFC 2202 test case 2 |
 | ostauth_test.go (TestAESGMAC) | the AES-GCM tag of an all-zero key and IV with no data (NIST SP 800-38D test case 1), computed through Go's crypto/cipher |
-| interop/ | opendnp3 3.1.2 as master and outstation |
+| interop/ | opendnp3 3.1.2 as master and outstation (TCP, TLS, UDP, serial); opendnp3 2.1.0-RC5 as SAv5 master and outstation |
+| v020_test.go, session_test.go | this module's master and outstation, and hand-built frames (rawMaster, the fake outstation of TestLinkConfirmWhileFramesArrive) reproducing what opendnp3 sent in the interop tests |
 | every other test and example_test.go | the master and the outstation of this module against each other, written from the same standard; not a real device |
 
 All keys, passwords, certificates and addresses in the tests are made-up
