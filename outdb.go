@@ -499,6 +499,18 @@ func (db *PointDB) UpdateWith(ctx context.Context, typ string, index uint32, v f
 		}
 		return ok, nil
 	}
+	if !p.set(typ, v, raw, flags, t, mode) {
+		db.mu.Unlock()
+		return false, nil
+	}
+	db.mu.Unlock()
+	db.emit(ctx, p, typ, index, v, raw, flags, t)
+	return true, nil
+}
+
+// set gives p (under db.mu) a new value, flags and time and reports
+// whether an event is due (UpdateWith's modes but EventOnly).
+func (p *DBPoint) set(typ string, v float64, raw []byte, flags uint8, t time.Time, mode EventMode) bool {
 	changed := !p.known || p.Flags != flags
 	switch {
 	case typ == "virtual-terminal":
@@ -521,17 +533,10 @@ func (db *PointDB) UpdateWith(ctx context.Context, typ string, index uint32, v f
 		changed = false
 	}
 	p.Value, p.Raw, p.Flags, p.Time, p.known = v, raw, flags, t, true
-	if !changed || p.Class == 0 {
-		if changed {
-			p.reported = v
-		}
-		db.mu.Unlock()
-		return false, nil
+	if changed {
+		p.reported = v
 	}
-	p.reported = v
-	db.mu.Unlock()
-	db.emit(ctx, p, typ, index, v, raw, flags, t)
-	return true, nil
+	return changed && p.Class != 0
 }
 
 // emit buffers the event of point p in every association.
@@ -605,27 +610,38 @@ func (db *PointDB) SetDeadband(index uint32, v float64) bool {
 }
 
 // Freeze copies counters to frozen counters (clearing them with clear)
-// and returns the frozen points changed.
+// and returns the frozen points changed. Clearing is a change of the
+// counter: an event when it was not 0 already.
 func (db *PointDB) Freeze(ctx context.Context, indexes []uint32, clear bool, at time.Time) []uint32 {
+	type clearEvent struct {
+		index uint32
+		p     *DBPoint
+		flags uint8
+	}
 	db.mu.Lock()
 	var done []uint32
+	var cleared []clearEvent
 	for i, p := range db.points["counter"] {
 		if indexes != nil && !containsIdx(indexes, i) {
 			continue
 		}
 		p.Frozen = p.Value
-		if clear {
-			p.Value = 0
+		if clear && p.set("counter", 0, nil, p.Flags, at, EventDetect) {
+			cleared = append(cleared, clearEvent{i, p, p.Flags})
 		}
 		done = append(done, i)
 	}
 	db.mu.Unlock()
 	sort.Slice(done, func(a, b int) bool { return done[a] < done[b] })
+	sort.Slice(cleared, func(a, b int) bool { return cleared[a].index < cleared[b].index })
 	for _, i := range done {
 		p, _ := db.Point("counter", i)
 		if _, ok := db.Point("frozen-counter", i); ok {
 			_, _ = db.Update(ctx, "frozen-counter", i, p.Frozen, nil, p.Flags, at)
 		}
+	}
+	for _, c := range cleared {
+		db.emit(ctx, c.p, "counter", c.index, 0, nil, c.flags, at)
 	}
 	return done
 }
