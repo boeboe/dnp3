@@ -476,33 +476,40 @@ func (m *Master) aggressiveConfirm(f Fragment, uns bool) (Fragment, bool) {
 }
 
 // keepAlive sends REQUEST_LINK_STATUS after KeepAlive without a received
-// frame and ends the connection when nothing arrives within Timeout.
+// frame and ends the connection when nothing arrives within Timeout. The
+// interval restarts at every frame received, the answer to a keep-alive
+// included.
 func (m *Master) keepAlive() {
 	t := time.NewTimer(m.cfg.KeepAlive)
 	defer t.Stop()
+	var probed time.Time // the unanswered REQUEST_LINK_STATUS, zero for none
 	for {
 		select {
 		case <-m.done:
 			return
 		case <-t.C:
 		}
-		idle := time.Since(time.Unix(0, m.lastRx.Load()))
-		if idle < m.cfg.KeepAlive {
+		last := time.Unix(0, m.lastRx.Load())
+		if !probed.IsZero() {
+			if last.Before(probed) {
+				if wait := m.cfg.Timeout - time.Since(probed); wait > 0 {
+					t.Reset(wait)
+					continue
+				}
+				m.fail(errors.New("connection lost: no answer to the keep-alive link status request"))
+				return
+			}
+			probed = time.Time{}
+		}
+		if idle := time.Since(last); idle < m.cfg.KeepAlive {
 			t.Reset(m.cfg.KeepAlive - idle)
 			continue
 		}
-		sent := time.Now()
+		probed = time.Now()
 		m.sendPrimary(LinkRequestLinkStatus, nil)
-		select {
-		case <-m.done:
-			return
-		case <-time.After(m.cfg.Timeout):
-		}
-		if m.lastRx.Load() < sent.UnixNano() {
-			m.fail(errors.New("connection lost: no answer to the keep-alive link status request"))
-			return
-		}
-		t.Reset(m.cfg.KeepAlive)
+		// Look again when the interval would end after an answer at once,
+		// or at the timeout if that comes first.
+		t.Reset(min(m.cfg.KeepAlive, m.cfg.Timeout))
 	}
 }
 
