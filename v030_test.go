@@ -101,3 +101,35 @@ func TestEventBufferPolicies(t *testing.T) {
 		t.Error("overflow still reported with room again")
 	}
 }
+
+// FREEZE AND CLEAR changes the counter: the clear is a counter event like
+// any other change, and a counter already at 0 makes none.
+func TestFreezeClearMakesCounterEvent(t *testing.T) {
+	ctx := context.Background()
+	b := dnp3.NewEventBuffer(nil, nil)
+	db := dbWith(t, b,
+		dnp3.DBPoint{Type: "counter", Index: 0, Class0: true, Class: 1, Deadband: 1},
+		dnp3.DBPoint{Type: "counter", Index: 1, Class0: true, Class: 1},
+		dnp3.DBPoint{Type: "frozen-counter", Index: 0, Class0: true})
+	now := time.Now()
+	_, _ = db.Update(ctx, "counter", 0, 5, nil, 0x01, now)
+	_, _ = db.Update(ctx, "counter", 1, 0, nil, 0x01, now)
+	var ids []int64
+	for _, e := range b.Pending(map[int]bool{1: true}, 0) {
+		ids = append(ids, e.ID)
+	}
+	b.Remove(ctx, ids)
+	db.Freeze(ctx, nil, true, now.Add(time.Second))
+	if p, _ := db.Point("frozen-counter", 0); p.Value != 5 {
+		t.Errorf("frozen %v", p.Value)
+	}
+	evs := b.Pending(map[int]bool{1: true}, 0)
+	if len(evs) != 1 || evs[0].Group != 22 || evs[0].Index != 0 || evs[0].Value != 0 {
+		t.Fatalf("counter events after FREEZE AND CLEAR: %+v", evs)
+	}
+	// The deadband compares later values with the cleared one, not with
+	// the value before the clear.
+	if ok, _ := db.Update(ctx, "counter", 0, 5, nil, 0x01, now); !ok {
+		t.Error("the counter counting from 0 to 5 again made no event")
+	}
+}
