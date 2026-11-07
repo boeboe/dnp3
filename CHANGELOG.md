@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 (2026-11-07)
 
 Fixed, all reported with fixes by @boeboe (issues #2 to #5, PRs #6 to #9):
 
