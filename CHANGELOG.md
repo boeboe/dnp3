@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+Fixed, all reported with fixes by @boeboe (issues #2 to #5, PRs #6 to #9):
+
+- `PointDB.Freeze` with clear set counters to 0 directly: no counter
+  (g22) event was buffered and the deadband went on comparing with the
+  value before the clear. The clear now goes through the same change
+  detection as `Update`, under the lock: an event when the counter was
+  not 0 already, none otherwise.
+- The outstation treated any request with the sequence number and octets
+  of the previous one as a retry and repeated the cached response, a
+  READ included, and across connections. A repeated READ is now answered
+  with the current values, and a request on a new connection is never
+  the retry of one on the old.
+- GET_FILE_INFO (g70v7) answered with the full path as the file name
+  where the directory listing gives the base name. It now answers with
+  the base name of the normalised path; the root keeps the name it was
+  asked by.
+- `Master.keepAlive` waited the full `Timeout` after each
+  REQUEST_LINK_STATUS before restarting the `KeepAlive` timer, so idle
+  keep-alives came every `KeepAlive` + `Timeout`. The interval now
+  restarts when the answer frame arrives (13.2.3.3); an unanswered
+  request still ends the connection at `Timeout`.
+
 ## v0.3.0 (2026-10-12)
 
 Added, all backwards compatible:
