@@ -327,6 +327,53 @@ func readFrags(t *testing.T, c net.Conn, lp *dnp3.LinkParser, within time.Durati
 	return out
 }
 
+// A READ changes nothing, so one repeated with the same sequence is
+// answered with the current values rather than the previous response; and
+// a request on a new connection is never the repeat of one on the old.
+func TestOutstationRepeatedReadAndNewConnection(t *testing.T) {
+	o := startOutstation(t, nil)
+	ctx := context.Background()
+	read := dnp3.Fragment{Control: dnp3.AppFIR | dnp3.AppFIN | 0x03, Func: dnp3.FCRead, Objects: dnp3.AppendHeader(nil, 20, 1, dnp3.Q8StartStop, 0, 0)}
+	counter := func(c net.Conn, lp *dnp3.LinkParser) any {
+		t.Helper()
+		sendFrag(t, c, 10, read)
+		return pointsOf(t, readFrags(t, c, lp, 300*time.Millisecond))[[2]uint32{20, 0}].Value
+	}
+	c, lp := rawClient(t, o.url)
+	if v := counter(c, lp); v != 42.0 {
+		t.Fatalf("counter %v", v)
+	}
+	_, _ = o.db.Update(ctx, "counter", 0, 43, nil, 0x01, time.Now())
+	if v := counter(c, lp); v != 43.0 {
+		t.Fatalf("repeated READ answered %v, not the current 43", v)
+	}
+	_ = c.Close()
+	_, _ = o.db.Update(ctx, "counter", 0, 44, nil, 0x01, time.Now())
+	c, lp = rawClient(t, o.url)
+	if v := counter(c, lp); v != 44.0 {
+		t.Fatalf("READ on a new connection answered %v, not the current 44", v)
+	}
+	// A repeated control is not executed twice on one connection, but the
+	// same octets on the next connection are a new request.
+	operate := dnp3.Fragment{Control: dnp3.AppFIR | dnp3.AppFIN | 0x04, Func: dnp3.FCDirectOperate, Objects: crobObjs(t, 0)}
+	controls := func() int { o.h.mu.Lock(); defer o.h.mu.Unlock(); return len(o.h.controls) }
+	for range 2 {
+		sendFrag(t, c, 10, operate)
+		if frs := readFrags(t, c, lp, 300*time.Millisecond); len(frs) != 1 {
+			t.Fatalf("%d responses to DIRECT_OPERATE", len(frs))
+		}
+	}
+	if n := controls(); n != 1 {
+		t.Fatalf("a repeated control executed %d times", n)
+	}
+	_ = c.Close()
+	c, lp = rawClient(t, o.url)
+	sendFrag(t, c, 10, operate)
+	if frs := readFrags(t, c, lp, 300*time.Millisecond); len(frs) != 1 || controls() != 2 {
+		t.Fatalf("control on a new connection: %d responses, %d executed", len(frs), controls())
+	}
+}
+
 // Covers: SIG-IPE-1606
 func TestOutstationUnsolicitedRetriesAndBroadcast(t *testing.T) {
 	o := startOutstation(t, func(c *dnp3.OutstationConfig) { c.Unsolicited, c.UnsolRetries = true, 1 })

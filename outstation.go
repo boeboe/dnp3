@@ -136,6 +136,7 @@ type inbound struct {
 	raw     []byte
 	dest    uint16
 	arrived time.Time
+	link    uint64 // the link it came on (Association.links)
 }
 
 // Association is the outstation's side of one master–outstation
@@ -149,6 +150,7 @@ type Association struct {
 	ra       Reassembler
 	tseq     uint8
 	lastRx   time.Time
+	links    uint64 // links attached so far: a new connection is a new number
 	attached chan struct{}
 
 	in   chan inbound
@@ -165,6 +167,7 @@ type Association struct {
 	started    bool // first request after restart seen
 	lastReq    []byte
 	lastSeq    uint8
+	lastLink   uint64
 	lastResp   [][]byte
 	sel        *selection
 	bcast      uint16 // broadcast address received, 0 none
@@ -239,6 +242,9 @@ func (a *Association) Attach(l OutLink) {
 	a.mu.Lock()
 	old := a.link
 	a.link = l
+	if l != old {
+		a.links++
+	}
 	a.sec = Secondary{}
 	a.ra = Reassembler{}
 	a.lastRx = time.Now()
@@ -291,7 +297,7 @@ func (a *Association) Deliver(f Frame) {
 		return
 	}
 	act := a.sec.Handle(f)
-	link := a.link
+	link, gen := a.link, a.links
 	a.mu.Unlock()
 	if act.Respond && link != nil {
 		_ = link.WriteFrame(Frame{Ctrl: act.Func, Dest: a.cfg.Master, Src: a.cfg.Address})
@@ -310,7 +316,7 @@ func (a *Association) Deliver(f Frame) {
 		return
 	}
 	select {
-	case a.in <- inbound{frag: frag, raw: apdu, dest: f.Dest, arrived: now}:
+	case a.in <- inbound{frag: frag, raw: apdu, dest: f.Dest, arrived: now, link: gen}:
 	default:
 		a.cfg.Log.Warn("DNP3 outstation request dropped: the association is busy")
 	}
@@ -737,8 +743,10 @@ func (a *Association) handle(ctx context.Context, in inbound, sol *solState) *so
 		a.cfg.Auth.stat(StatMessagesReceived)
 	}
 	// Identical retry of the previous request: repeat the response
-	// without executing again (Table 6-1).
-	if !bc && a.started && req.Seq() == a.lastSeq && bytes.Equal(in.raw, a.lastReq) && len(a.lastResp) > 0 && req.Func != FCSelect {
+	// without executing again (Table 6-1). A READ changes nothing and is
+	// answered afresh, and a request on a new connection is never a retry
+	// of one on the old.
+	if !bc && a.started && req.Seq() == a.lastSeq && bytes.Equal(in.raw, a.lastReq) && len(a.lastResp) > 0 && req.Func != FCSelect && req.Func != FCRead && in.link == a.lastLink {
 		for _, b := range a.lastResp[:1] {
 			f, _ := ParseFragment(b)
 			_ = a.send(f)
@@ -746,7 +754,7 @@ func (a *Association) handle(ctx context.Context, in inbound, sol *solState) *so
 		return sol
 	}
 	a.started = true
-	a.lastReq, a.lastSeq = in.raw, req.Seq()
+	a.lastReq, a.lastSeq, a.lastLink = in.raw, req.Seq(), in.link
 	user := uint16(0)
 	if bc {
 		if a.cfg.BroadcastFuncs != nil && !a.cfg.BroadcastFuncs[req.Func] {
