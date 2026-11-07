@@ -415,6 +415,10 @@ func TestOutstationFileRules(t *testing.T) {
 	if d, err := fc.Info(ctx, "cfg"); err != nil || d.Type != 0 || d.Size != 3 {
 		t.Errorf("directory information %+v %v", d, err)
 	}
+	// The information names the file as its directory entry does.
+	if d, err := fc.Info(ctx, `\cfg\new.bin`); err != nil || d.Name != "new.bin" || d.Size != 12 {
+		t.Errorf("file information %+v %v", d, err)
+	}
 	if _, err := fc.Info(ctx, "nope"); err == nil || !strings.Contains(err.Error(), "file-not-found") {
 		t.Errorf("information of a missing file: %v", err)
 	}
