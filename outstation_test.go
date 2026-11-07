@@ -347,7 +347,14 @@ func TestOutstationRepeatedReadAndNewConnection(t *testing.T) {
 	if v := counter(c, lp); v != 43.0 {
 		t.Fatalf("repeated READ answered %v, not the current 43", v)
 	}
-	_ = c.Close()
+	// The outstation tests a connection it still has before taking a new
+	// one, so wait until it has seen the old one close.
+	closed := func() {
+		t.Helper()
+		_ = c.Close()
+		eventually(t, time.Second, "the old connection to detach", func() bool { return !o.assoc.Linked() })
+	}
+	closed()
 	_, _ = o.db.Update(ctx, "counter", 0, 44, nil, 0x01, time.Now())
 	c, lp = rawClient(t, o.url)
 	if v := counter(c, lp); v != 44.0 {
@@ -366,7 +373,7 @@ func TestOutstationRepeatedReadAndNewConnection(t *testing.T) {
 	if n := controls(); n != 1 {
 		t.Fatalf("a repeated control executed %d times", n)
 	}
-	_ = c.Close()
+	closed()
 	c, lp = rawClient(t, o.url)
 	sendFrag(t, c, 10, operate)
 	if frs := readFrags(t, c, lp, 300*time.Millisecond); len(frs) != 1 || controls() != 2 {
