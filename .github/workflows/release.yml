@@ -1,0 +1,72 @@
+name: release
+
+# Tags a release and publishes it on GitHub. Run it by hand with the
+# version to release (for example v0.3.1); the commit on main must
+# already carry the CHANGELOG.md section for that version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag, as in the changelog (vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like vX.Y.Z, got $VERSION"; exit 1 ;;
+          esac
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION already exists"; exit 1
+          fi
+          if ! grep -q "^## $VERSION (" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section '## $VERSION (date)'"; exit 1
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      - name: build without cgo
+        run: CGO_ENABLED=0 go build ./...
+      - name: test
+        run: go test -race ./...
+      - name: release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## " v " \\(" { on = 1; next }
+            /^## / { if (on) exit }
+            on { print }
+          ' CHANGELOG.md | sed -e '1{/^$/d}' > notes.md
+          test -s notes.md
+      - name: tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "refs/tags/$VERSION"
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "$VERSION" --title "$VERSION" --notes-file notes.md
